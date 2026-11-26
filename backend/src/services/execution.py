@@ -1,12 +1,15 @@
 import json
 import logging
 
-from src.domain.project import analyze
+from src.domain.project import analyze, analyze_normalized
 
 
-def calculate(rows, settings):
+def calculate(rows, settings, *, normalized: bool = False, corrections=None):
     try:
-        result = analyze(rows, settings)
+        if normalized:
+            result = analyze_normalized(rows, settings, corrections)
+        else:
+            result = analyze(rows, settings, corrections)
         json.dumps(result, ensure_ascii=False, allow_nan=False)
     except ValueError as error:
         return None, str(error)

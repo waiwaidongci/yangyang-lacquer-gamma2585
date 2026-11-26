@@ -7,7 +7,7 @@ import numpy as np
 from sklearn.metrics import mean_absolute_error, mean_gamma_deviance
 
 from .model import Fit, Partition
-from .records import FEATURES, FIELDS, Row
+from .records import FEATURES, FIELDS, Row, is_usable_measurement
 
 
 @dataclass(frozen=True)
@@ -18,11 +18,24 @@ class Score:
 
 
 def holdout_scores(holdout: list[Row], fitted: Fit, predictions: list[float]) -> list[Score]:
-    actual = [row["dry_hours"] for row in holdout]
+    # Callers normally pass the usable partition directly.  Be tolerant of a
+    # date-side list containing quarantined/disputed measurements as well.
+    if len(predictions) == len(holdout):
+        pairs = [
+            (row, estimate)
+            for row, estimate in zip(holdout, predictions, strict=True)
+            if is_usable_measurement(row)
+        ]
+    else:
+        pairs = list(zip((r for r in holdout if is_usable_measurement(r)), predictions, strict=True))
+    if len(pairs) < 4:
+        raise ValueError("留出日期须至少覆盖 4 条有效已完工工单，才能复算对照表现。")
+    actual = [row["dry_hours"] for row, _ in pairs]
+    usable_predictions = [estimate for _, estimate in pairs]
     comparators = (
-        ("Gamma 回归", predictions),
-        ("训练集平均干燥工时", [fitted.train_mean] * len(holdout)),
-        ("原排班预留工时", [row["planned_hours"] for row in holdout]),
+        ("Gamma 回归", usable_predictions),
+        ("训练集平均干燥工时", [fitted.train_mean] * len(pairs)),
+        ("原排班预留工时", [row["planned_hours"] for row, _ in pairs]),
     )
     scores = []
     try:

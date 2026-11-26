@@ -4,7 +4,7 @@ from math import exp
 
 from .diagnostics import day_audit, holdout_scores, planned_batch_summary, planned_comparisons
 from .model import Fit, Partition
-from .records import FEATURES, FIELDS
+from .records import FEATURES, FIELDS, measurement_issue_rows
 
 
 ORDER_LABELS = {key: FIELDS[key] for key in ("id", "work_date", "prep_batch")}
@@ -15,7 +15,7 @@ def _table(key: str, title: str, labels: dict, rows: list[dict]) -> dict:
     return {"key": key, "title": title, "columns": list(labels), "labels": labels, "rows": rows}
 
 
-def build_report(split: Partition, fitted: Fit) -> dict:
+def build_report(split: Partition, fitted: Fit, corrections: list[dict] | None = None) -> dict:
     estimates = fitted.predict(split.holdout)
     scores = holdout_scores(split.holdout, fitted, estimates)
     planning = planned_comparisons(split.planned, fitted)
@@ -35,6 +35,54 @@ def build_report(split: Partition, fitted: Fit) -> dict:
         }
         for row, estimate in zip(split.holdout, estimates, strict=True)
     ]
+    training_orders = [
+        {
+            "id": row["id"],
+            "work_date": row["work_date"],
+            "prep_batch": row["prep_batch"],
+            "dry_hours": row["dry_hours"],
+            "planned_hours": row["planned_hours"],
+        }
+        for row in split.train
+    ]
+    issue_candidates = split.all_history
+    if not issue_candidates:
+        unique_rows = {}
+        for row in [
+            *split.train_all, *split.holdout_all, *split.excluded,
+            *split.invalid, *split.train, *split.holdout,
+        ]:
+            unique_rows.setdefault(row["id"], row)
+        issue_candidates = list(unique_rows.values())
+    source_issues = measurement_issue_rows(issue_candidates)
+    train_ids = {row["id"] for row in split.train}
+    holdout_ids = {row["id"] for row in split.holdout}
+    excluded_ids = {row["id"] for row in split.excluded}
+    holdout_date_ids = {row["id"] for row in split.holdout_all}
+    assignment_rows = []
+    assignment_history = split.all_history or issue_candidates
+    for row in [*assignment_history, *split.planned]:
+        if row.get("record_type") == "planned":
+            assignment = "planned"
+            measurement_status = "not_measured"
+        elif row["id"] in excluded_ids:
+            assignment = "batch_excluded"
+            measurement_status = row.get("measurement_status", "valid")
+        elif row["id"] in holdout_date_ids:
+            assignment = "holdout"
+            measurement_status = row.get("measurement_status", "valid")
+        else:
+            assignment = "training"
+            measurement_status = row.get("measurement_status", "valid")
+        assignment_rows.append({
+            "id": row["id"],
+            "work_date": row["work_date"],
+            "prep_batch": row["prep_batch"],
+            "assignment": assignment,
+            "measurement_status": measurement_status,
+            "used_for_fit": row["id"] in train_ids,
+            "used_for_score": row["id"] in holdout_ids,
+        })
     coefficients = [
         {
             "feature": FIELDS[key],
@@ -59,10 +107,38 @@ def build_report(split: Partition, fitted: Fit) -> dict:
             "work_date": FIELDS["work_date"], "prep_batch": FIELDS["prep_batch"], "orders": "工单数",
             "over_plan": "超预留工单数", "largest_gap_hours": "最大工单缺口（小时）", "first_order": "最大缺口对应工单",
         }, planned_batch_summary(planning)),
+        _table("training_orders", "训练工单样本", {
+            **ORDER_LABELS, "dry_hours": FIELDS["dry_hours"], "planned_hours": FIELDS["planned_hours"],
+        }, training_orders),
         _table("holdout_orders", "留出工单残差", {
             **ORDER_LABELS, "dry_hours": FIELDS["dry_hours"], "estimated_hours": ESTIMATE_LABEL,
             "residual_hours": "实测减估时（小时）", "planned_hours": FIELDS["planned_hours"],
         }, residuals),
+        *([
+            _table("measurement_issues", "异常实测原值与原因", {
+                **ORDER_LABELS, "measurement_status": "处理状态", "dry_hours_raw": "导入原值",
+                "reason": "不入模原因",
+            }, source_issues),
+        ] if source_issues else []),
+        *([
+            _table("measurement_corrections", "干燥实测补正记录", {
+                "order_id": FIELDS["id"], "correction_uid": "补正标识", "batch_uid": "补正批次",
+                "dry_hours": "补正实测（小时）", "raw_value": "提交原值", "reason": "补正说明",
+                "status": "入账状态", "detail": "状态说明",
+            }, [
+                {
+                    "order_id": item.get("order_id") or item.get("id") or item.get("record_id"),
+                    "correction_uid": item.get("correction_uid") or item.get("correction_id") or item.get("idempotency_key") or "",
+                    "batch_uid": item.get("batch_uid") or item.get("batch_id") or "",
+                    "dry_hours": item.get("dry_hours") if item.get("dry_hours") is not None else item.get("corrected_hours"),
+                    "raw_value": "" if item.get("raw_value") is None else item.get("raw_value"),
+                    "reason": item.get("reason") or item.get("note") or "",
+                    "status": item.get("status") or "received",
+                    "detail": item.get("detail") or "",
+                }
+                for item in corrections
+            ]),
+        ] if corrections else []),
         _table("day_split", "作业日切分台账", {
             "work_date": FIELDS["work_date"], "training": "训练工单", "holdout": "留出工单",
             "excluded": "跨界隔离工单", "planned": "待排班工单",
@@ -74,6 +150,12 @@ def build_report(split: Partition, fitted: Fit) -> dict:
         }, coefficients),
     ]
     warnings = []
+    invalid_count = len(source_issues)
+    disputed_count = sum(row.get("measurement_status") == "disputed" for row in split.all_history)
+    if invalid_count:
+        warnings.append(f"{invalid_count} 条干燥实测无效或存在分歧，已保留导入原值和原因，且不参与拟合或评分。")
+    if disputed_count:
+        warnings.append(f"{disputed_count} 条工单的补正数值存在分歧，当前暂缓使用；全部补正记录均已留存。")
     if split.excluded:
         batch_count = len({row["prep_batch"] for row in split.excluded})
         warnings.append(f"{batch_count} 个配漆批次跨过切点，较早一侧的 {len(split.excluded)} 条工单已隔离。")
@@ -97,6 +179,37 @@ def build_report(split: Partition, fitted: Fit) -> dict:
             "留出平均 Gamma 偏差": round(scores[0].gamma_deviance, 6),
             "超预留计划数": over_plan,
         },
+        "training_sample_ids": [row["id"] for row in split.train],
+        "holdout_sample_ids": [row["id"] for row in split.holdout],
+        "training_samples": [row["id"] for row in split.train],
+        "holdout_samples": [row["id"] for row in split.holdout],
+        "train_samples": [row["id"] for row in split.train],
+        "training_sample_count": len(split.train),
+        "holdout_sample_count": len(split.holdout),
+        "training_rows": [dict(row) for row in split.train],
+        "train_rows": [dict(row) for row in split.train],
+        "training_records": [dict(row) for row in split.train],
+        "issues": source_issues,
+        "measurement_issues": source_issues,
+        "invalid_measurements": source_issues,
+        "holdout_rows": residuals,
+        "holdout_records": residuals,
+        "training_assigned_sample_ids": [row["id"] for row in split.train_all],
+        "holdout_assigned_sample_ids": [row["id"] for row in split.holdout_all],
+        "excluded_sample_ids": [row["id"] for row in split.excluded],
+        "invalid_sample_ids": [row["id"] for row in split.invalid],
+        "planned_sample_ids": [row["id"] for row in split.planned],
+        "sample_ids": {
+            "training": [row["id"] for row in split.train],
+            "holdout": [row["id"] for row in split.holdout],
+            "training_assigned": [row["id"] for row in split.train_all],
+            "holdout_assigned": [row["id"] for row in split.holdout_all],
+            "excluded": [row["id"] for row in split.excluded],
+            "invalid": [row["id"] for row in split.invalid],
+            "planned": [row["id"] for row in split.planned],
+        },
+        "sample_assignments": assignment_rows,
+        "assignments": assignment_rows,
         "tables": tables,
         "warnings": warnings,
     }

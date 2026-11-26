@@ -2,11 +2,17 @@
 
 from math import isfinite
 
+from .corrections import CorrectionLedger, merge_corrections
 from .fixtures import demo_rows as demo_rows
 from .model import chronological_split, fit_gamma
-from .records import FIELDS, normalize_rows as normalize_rows
+from .records import FIELDS, import_rows, measurement_issue_rows, normalize_rows as normalize_rows
 from .reporting import build_report
 
+
+# Public compatibility aliases for callers/tests using descriptive names.
+apply_corrections = merge_corrections
+reconcile_corrections = merge_corrections
+import_source_rows = import_rows
 
 SPEC = {
     "columns": list(FIELDS),
@@ -38,7 +44,26 @@ def _settings(settings: dict) -> dict:
     return values
 
 
-def analyze(rows: list[dict], settings: dict) -> dict:
-    options = _settings(settings)
-    split = chronological_split(normalize_rows(rows), options["holdout_percent"])
-    return build_report(split, fit_gamma(split.train, options["alpha"]))
+def analyze_normalized(rows: list[dict], settings: dict, corrections: list[dict] | None = None) -> dict:
+    options = _settings(settings or {})
+    correction_records = corrections
+    if corrections:
+        reconciliation = merge_corrections(rows, corrections)
+        rows = reconciliation["rows"]
+        correction_records = reconciliation["corrections"]
+    split = chronological_split(rows, options["holdout_percent"])
+    fitted = fit_gamma(split.train, options["alpha"])
+    return build_report(split, fitted, correction_records)
+
+
+def analyze(rows: list[dict], settings: dict, corrections: list[dict] | None = None) -> dict:
+    options = _settings(settings or {})
+    normalized = normalize_rows(rows, strict_columns=True)
+    correction_records = None
+    if corrections:
+        reconciliation = merge_corrections(normalized, corrections)
+        normalized = reconciliation["rows"]
+        correction_records = reconciliation["corrections"]
+    split = chronological_split(normalized, options["holdout_percent"])
+    fitted = fit_gamma(split.train, options["alpha"])
+    return build_report(split, fitted, correction_records)

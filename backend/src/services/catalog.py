@@ -4,12 +4,21 @@ import json
 from sqlalchemy import select
 
 from src.domain.project import normalize_rows, SPEC
+from src.domain.records import measurement_issue_rows
 from src.models.dataset import Dataset
 from src.utils.csv_files import read_rows
 
 
 def overview(dataset):
-    return {'id': dataset.id, 'name': dataset.name, 'checksum': dataset.checksum, 'count': len(dataset.rows)}
+    issues = measurement_issue_rows(dataset.rows)
+    return {
+        'id': dataset.id,
+        'name': dataset.name,
+        'checksum': dataset.checksum,
+        'count': len(dataset.rows),
+        'issue_count': len(issues),
+        'invalid_count': len(issues),
+    }
 
 
 def list_datasets(session):

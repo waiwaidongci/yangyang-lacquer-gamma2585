@@ -13,3 +13,5 @@ class DatasetInfo(BaseModel):
     name: str
     checksum: str
     count: int
+    issue_count: int = 0
+    invalid_count: int = 0

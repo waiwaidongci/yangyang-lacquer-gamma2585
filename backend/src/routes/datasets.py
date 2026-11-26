@@ -3,6 +3,8 @@ from fastapi import APIRouter, Query
 from src.controllers.dependencies import Actor, Db, Writer
 from src.schemas.datasets import DatasetImport, DatasetInfo
 from src.services.catalog import get_dataset, import_dataset, list_datasets, overview
+from src.services.corrections import effective_rows
+from src.domain.records import measurement_issue_rows
 
 router = APIRouter(prefix='/datasets')
 
@@ -15,7 +17,11 @@ def datasets(session: Db, actor: Actor):
 @router.get('/{dataset_id}')
 def detail(dataset_id: int, session: Db, actor: Actor, offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200)):
     dataset = get_dataset(session, dataset_id)
-    return {**overview(dataset), 'rows': dataset.rows[offset:offset + limit]}
+    rows, _ = effective_rows(session, dataset)
+    info = overview(dataset)
+    info['issue_count'] = len(measurement_issue_rows(rows))
+    info['invalid_count'] = info['issue_count']
+    return {**info, 'rows': rows[offset:offset + limit]}
 
 
 @router.post('', response_model=DatasetInfo, status_code=201)

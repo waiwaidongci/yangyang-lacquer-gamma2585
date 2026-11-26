@@ -8,6 +8,7 @@ from src.domain.project import SPEC
 from src.models.review import Review
 from src.models.run import Run
 from src.services.catalog import get_dataset
+from src.services.corrections import effective_rows
 from src.services.execution import calculate
 from src.utils.time import utc_stamp
 
@@ -48,13 +49,18 @@ def validate_settings(settings):
 
 
 def create_run(session, payload, actor):
-    rows = get_dataset(session, payload.dataset_id).rows
-    actor_id = actor.id
+    dataset = get_dataset(session, payload.dataset_id)
     settings = validate_settings(payload.settings)
     created_at = utc_stamp()
+    effective, correction_records = effective_rows(session, dataset)
     session.rollback()
-    result, error = calculate(rows, settings)
-    run = Run(label=payload.label, dataset_id=payload.dataset_id, created_by=actor_id,
+    result, error = calculate(
+        effective,
+        settings,
+        normalized=True,
+        corrections=correction_records,
+    )
+    run = Run(label=payload.label, dataset_id=payload.dataset_id, created_by=actor.id,
               created_at=created_at, settings=settings, result=result, error=error,
               status=RunStatus.FAILED if error is not None else RunStatus.COMPLETED)
     session.add(run)
@@ -66,7 +72,15 @@ def export_table(session, run_id, key, actor):
     run, review = get_run(session, run_id, actor)
     if review is None or review.decision != Decision.APPROVED:
         raise HTTPException(409, '复核通过后可下载正式 CSV')
+    key_aliases = {
+        'training_samples': 'training_orders',
+        'train_samples': 'training_orders',
+        'invalid_measurements': 'measurement_issues',
+        'source_issues': 'measurement_issues',
+        'correction_orders': 'measurement_corrections',
+    }
+    effective_key = key_aliases.get(key, key)
     for table in run.result['tables']:
-        if table['key'] == key:
+        if table['key'] == effective_key:
             return table
     raise LookupError('找不到结果表')
